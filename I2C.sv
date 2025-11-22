@@ -1,805 +1,687 @@
-`timescale 1ns/1ps
-
-module I2C_master#(
-    parameter clk_frequency = 40000000, // 40MHz
-    parameter i2c_frequency = 100000 // 100KHz
-)(
-    input clk, rst, op,
-    inout sda,
-    output scl,
-    input [7:0] din,
-    input [6:0] addr,
-    output [7:0] dout,
-    output reg ack_err, done, busy,
-    input start_bit
-);
-
-    // GENERATING CLOCK
-    parameter clk_count = clk_frequency/i2c_frequency;
-    parameter clk4 = clk_count/4;
-
-    reg [2:0] pulse;
-    integer count;
-
-    always@(posedge clk) begin
-
-        if(rst) begin
-            pulse <= 0;
-            count <= 0;
-        end
-        else if(busy == 1'b0) begin
-            pulse <= 0;
-            count <= 0;
-        end
-        else if(count == clk4 - 1) begin
-            pulse <= 1;
-            count <= count + 1;
-        end
-        else if(count == clk4*2 - 1) begin
-            pulse <= 2;
-            count <= count + 1;
-        end
-        else if(count == clk4*3 - 1) begin
-            pulse <= 3;
-            count <= count + 1;
-        end
-        else if(count == clk4*4 - 1) begin
-            pulse <= 0;
-            count <= 0;
-        end
-        else begin
-            count <= count + 1;
-        end
-
-
-    end
-
-    // MASTER FSM
-
-    parameter IDLE = 0;
-    parameter START = 1;
-    parameter ADDR = 2;
-    parameter ADDR_ACK = 3;
-    parameter WRITE = 4;
-    parameter READ = 5;
-    parameter SLAVE_ACK = 6;
-    parameter MASTER_ACK = 7;
-    parameter STOP = 8;
-
-    reg [3:0] NS;
-
-    reg [7:0] temp_data, temp_addr, temp_dout;
-
-    reg recv_ack;
-
-    integer data_count;
-
-    reg wr_en;
-    reg scl_temp, sda_temp;
-
-    always@(posedge clk) begin
-
-        if(rst) begin
-
-            busy <= 1'b0;
-            temp_data <= 0;
-            temp_addr <= 0;
-            temp_dout <= 0;
-            ack_err <= 0;
-            done <= 0;
-            data_count <= 0;
-            wr_en <= 1'b0;
-            NS <= IDLE;
-            scl_temp <= 1'b1;
-            sda_temp <= 1'b1;
-
-        end
-        else begin
-            case(NS)
-
-                IDLE: begin
-                    done <= 1'b0;
-                    temp_dout <= 0;
-                    if(start_bit) begin
-                        NS <= START;
-                        wr_en <= 1'b1;
-                        busy <= 1'b1;
-                        temp_data <= din;
-                        temp_addr <= {addr, op};
-                    end
-                    else begin
-                        NS <= IDLE;
-                        wr_en <= 1'b0;
-                        temp_data <= 0;
-                        busy <= 1'b0;
-                        temp_addr <= 0;
-                    end
-
-                end
-
-                START: begin
-
-                    case(pulse)
-
-                        0: begin
-                            scl_temp <= 1'b1;
-                            sda_temp <= 1'b1;
-                        end
-                        1: begin
-                            scl_temp <= 1'b1;
-                            sda_temp <= 1'b1;
-                        end
-                        2: begin
-                            scl_temp <= 1'b1;
-                            sda_temp <= 1'b0;
-                        end
-                        3: begin
-                            scl_temp <= 1'b1;
-                            sda_temp <= 1'b0;
-                        end
-
-                    endcase
-
-                    if(count == clk4*4 - 1) begin
-                        NS <= ADDR;
-                        scl_temp <= 1'b0;
-                    end
-                    else begin
-                        NS <= START;
-                    end
-
-                end
-
-                ADDR: begin
-                    
-                    wr_en <= 1'b1;
-
-                    if(data_count<=7) begin
-                        case(pulse)
-                            0: begin
-                                scl_temp <= 1'b0;
-                                sda_temp <= 1'd0;
-                            end
-                            1: begin
-                                scl_temp <= 1'b0;
-                                sda_temp <= temp_addr[7-data_count];
-                            end
-                            2: begin
-                                scl_temp <= 1'b1;
-                                if(sda != temp_addr[7-data_count]) begin // arbitration
-                                    NS <= STOP;
-                                    ack_err <= 1'b1;
-                                end
-                            end
-                            3: begin
-                                scl_temp <= 1'b1;
-                            end
-                        endcase
-
-                        if(count == clk4*4 - 1) begin
-
-                            NS <= ADDR;
-                            scl_temp <= 1'b0;
-                            data_count <= data_count + 1;
-
-                        end
-                        else begin
-                            NS <= ADDR;
-                        end
-
-                    end
-                    else begin
-                        NS <= ADDR_ACK;
-                        wr_en <= 1'b0;
-                        data_count <= 0;
-                    end
-
-                end
-
-                ADDR_ACK: begin
-
-                    case(pulse)
-
-                        0: begin
-                            scl_temp <= 1'b0;
-                        end
-                        1: begin
-                            scl_temp <= 1'b0;
-                        end
-                        2: begin
-                            scl_temp <= 1'b1;
-                            recv_ack <= sda;
-                        end
-                        3: begin
-                            scl_temp <= 1'b1;
-                        end
-
-                    endcase
-
-                    if(count == clk4*4 - 1) begin
-                        if(recv_ack == 1'b0 && temp_addr[0] == 1'b0) begin
-                            NS <= WRITE;
-                            wr_en <= 1'b1;
-                          sda_temp <= 1'b0;
-                        end
-                        else if(recv_ack == 1'b0 && temp_addr[0] == 1'b1) begin
-                            NS <= READ;
-                            wr_en <= 1'b0;
-                        end
-                        else begin
-                            NS <= STOP;
-                            ack_err <= 1'b1;
-                            wr_en <= 1'b1;
-                        end
-                    end
-                    else begin
-                        NS <= ADDR_ACK;
-                    end
-
-                end
-
-                WRITE: begin
-
-                    if(data_count <= 7) begin
-
-                        case(pulse)
-                            0: begin
-                                scl_temp <= 1'b0;
-                                sda_temp <= 1'b0;
-                            end
-                            1: begin
-                                scl_temp <= 1'b0;
-                                sda_temp <= temp_data[7-data_count];
-                            end
-                            2: begin
-                                scl_temp <= 1'b1;
-                            end
-                            3: begin
-                                scl_temp <= 1'b1;
-                            end
-                        endcase
-
-                        if(count == clk4*4 - 1) begin
-                            NS <= WRITE;
-                            data_count <= data_count + 1;
-                            scl_temp <= 1'b0;
-                        end
-                        else begin
-                            NS <= WRITE;
-                        end
-
-                    end
-                    else begin
-                        NS <= SLAVE_ACK;
-                        wr_en <= 1'b0;
-                        data_count <= 0;
-                    end
-
-                end
-
-                READ: begin
-
-                    if(data_count <= 7) begin
-
-                        case(pulse)
-                            0: begin
-                                scl_temp <= 1'b0;
-                            end
-                            1: begin
-                                scl_temp <= 1'b0;
-                            end
-                            2: begin
-                                scl_temp <= 1'b1;
-                                temp_dout[7:0] <= (count == 200)? {temp_dout[6:0], sda}:temp_dout;
-                            end
-                            3: begin
-                                scl_temp <= 1'b1;
-                            end
-                        endcase
-
-                        if(count == clk4*4 - 1) begin
-                            NS <= READ;
-                            data_count <= data_count + 1;
-                            scl_temp <= 1'b0;
-                        end
-                        else begin
-                            NS <= READ;
-                        end
-
-                    end
-                    else begin
-                        NS <= MASTER_ACK;
-                        data_count <= 0;
-                        wr_en <= 1'b1;
-                    end
-
-                end
-
-                SLAVE_ACK: begin
-
-                    case(pulse)
-
-                        0: begin
-                            scl_temp <= 1'b0;
-                        end
-                        1: begin
-                            scl_temp <= 1'b0;
-                        end
-                        2: begin
-                            scl_temp <= 1'b1;
-                            recv_ack <= sda;
-                        end
-                        3: begin
-                            scl_temp <= 1'b1;
-                        end
-
-                    endcase
-
-                    if(count == clk4*4 - 1) begin
-                        if(recv_ack == 1'b0) begin
-                            sda_temp <= 1'b0;
-                            wr_en <= 1'b1;
-                            NS <= STOP;
-                            ack_err <= 1'b0;
-                        end
-                        else begin
-                            NS <= STOP;
-                            ack_err <= 1'b1;
-                            wr_en <= 1'b1;
-                            sda_temp <= 1'b0;
-                        end
-                    end
-                    else begin
-                        NS <= SLAVE_ACK;
-                    end
-
-                end
-
-                MASTER_ACK: begin
-
-                    case(pulse)
-
-                        0: begin
-                            scl_temp <= 1'b0;
-                            sda_temp <= 1'b1;
-                        end
-                        1: begin
-                            scl_temp <= 1'b0;
-                            sda_temp <= 1'b1;
-                        end
-                        2: begin
-                            scl_temp <= 1'b1;
-                            sda_temp <= 1'b1;
-                        end
-                        3: begin
-                            scl_temp <= 1'b1;
-                            sda_temp <= 1'b1;
-                        end
-
-                    endcase
-
-                    if(count == clk4*4 - 1) begin
-                        sda_temp <= 1'b0;
-                        wr_en <= 1'b1;
-                        NS <= STOP;
-                    end
-                    else begin
-                        NS <= MASTER_ACK;
-                    end
-
-                end
-
-                STOP: begin
-
-                    case(pulse)
-
-                        0: begin
-                            scl_temp <= 1'b1;
-                            sda_temp <= 1'b0;
-                        end
-                        1: begin
-                            scl_temp <= 1'b1;
-                            sda_temp <= 1'b0;
-                        end
-                        2: begin
-                            scl_temp <= 1'b1;
-                            sda_temp <= 1'b1;
-                        end
-                        3: begin
-                            scl_temp <= 1'b1;
-                            sda_temp <= 1'b1;
-                        end
-
-                    endcase
-
-                    if(count == clk4*4 - 1) begin
-                        NS <= IDLE;
-                        scl_temp <= 1'b0;
-                        busy <= 1'b0;
-                        done <= 1'b1; 
-                    end
-                    else begin
-                        NS <= STOP;
-                    end
-
-                end
-
-                default: NS <= IDLE;
-
-            endcase
-        end
-
-    end
-
-    assign sda = (wr_en == 1'b1) ? sda_temp:1'bz;
-    assign scl = scl_temp;
-    assign dout = temp_dout;
-
-endmodule
-
-module I2C_slave #(
-    parameter clk_frequency = 40000000, //40 MHz
-    parameter i2c_frequency = 100000 // 100KHz
-)(
-    input clk, rst, scl,
-    inout sda,
-    output reg ack_err, done
-);
-
-    // GENERATION OF CLOCK
-
-    reg busy;
-
-    parameter clk_count = clk_frequency/i2c_frequency;
-    parameter clk4 = clk_count/4;
-
-    reg [2:0] pulse;
-    integer count;
-
-    always@(posedge clk) begin
-
-        if(rst) begin
-            pulse <= 0;
-            count <= 0;
-        end
-        else if(~busy) begin
-            pulse <= 2;
-            count <= 201; // add constant delay for better clock catching
-        end
-        else if(count == clk4 - 1) begin
-            pulse <= 1;
-            count <= count + 1;
-        end
-        else if(count == clk4*2 - 1) begin
-            pulse <= 2;
-            count <= count + 1;
-        end
-        else if(count == clk4*3 - 1) begin
-            pulse <= 3;
-            count <= count + 1;
-        end
-        else if(count == clk4*4 - 1) begin
-            pulse <= 0;
-            count <= 0;
-        end
-        else begin
-            count <= count + 1;
-        end
-
-    end
-
-    // MEMORY FOR SLAVE
-
-    reg [7:0] dout;
-    reg [6:0] addr;
-    reg [7:0] din;
-    reg [7:0] mem [0:127];
-    integer i;
-    reg read_mem = 1'b0;
-    reg write_mem = 1'b0;
-
-    always@(posedge clk) begin
-        if(rst) begin
-            dout <= 0;
-            for(i = 0; i<128; i = i + 1) begin
-                mem[i] <= i;
-            end
-        end
-        else if(read_mem) begin
-            dout <= mem[addr];
-        end
-        else if(write_mem) begin
-            mem[addr] <= din;
-        end
-    end
-
-    // FSM FOR THE SLAVE
-
-    parameter IDLE = 0;
-    parameter START = 1;
-    parameter ADDR = 2;
-    parameter ADDR_ACK = 3;
-    parameter READ = 4;
-    parameter WRITE = 5;
-    parameter SLAVE_ACK = 6;
-    parameter MASTER_ACK = 7;
-    parameter STOP = 8;
-
-    reg [3:0] state;
-
-    reg [7:0] temp_data, temp_dout, temp_addr;
-    reg recv_ack;
-
-    int data_count;
-
-    reg sda_temp;
-    reg scl_temp;
-
-    reg wr_en;
-
-    always@(posedge clk) begin
-        scl_temp <= scl;
-    end
-
-    always@(posedge clk) begin
-        if(rst) begin
-            data_count <= 0;
-            temp_data <= 0;
-            temp_addr <= 0;
-            temp_dout <= 0;
-            addr <= 0;
-            state <= IDLE;
-            wr_en <= 1'b0;
-            ack_err <= 1'b0;
-            done <= 1'b0;
-            busy <= 1'b0;
-        end
-        else begin
-
-            case(state)
-
-                IDLE: begin
-                    if(scl == 1'b1 && sda == 1'b0) begin
-                        busy <= 1'b1;
-                        state <= START;
-                    end
-                    else begin
-                        state <= IDLE;
-                    end
-                end
-
-                START: begin
-
-                    if(count == 399 && pulse == 3) begin
-                        state <= ADDR;
-                        wr_en <= 1'b0;
-                    end
-                    else begin
-                        state <= START;
-                    end
-
-                end
-
-                ADDR: begin
-                    if(data_count <= 7) begin
-                        case(pulse)
-                            0: begin
-                            end
-                            1: begin
-                            end
-                            2: begin
-                                temp_addr[7:0] <= (count == 200)? {temp_addr[6:0], sda}:temp_addr;
-                            end
-                            3: begin
-                            end
-                        endcase
-
-                        if(count == clk4*4 - 1) begin
-                            state <= ADDR;
-                            data_count <= data_count + 1;
-                        end
-                        else begin
-                            state <= ADDR;
-                        end
-                    end
-                    else begin
-                        state <= ADDR_ACK;
-                        data_count <= 0;
-                        wr_en <= 1'b1;
-                        addr <= temp_addr[7:1];
-                    end
-                end
-                
-                ADDR_ACK: begin
-                    case(pulse)
-                    
-                        0: begin
-                            sda_temp <= 1'b0;
-                        end
-                        1: begin
-                        end
-                        2: begin
-                        end
-                        3: begin
-                        end
-
-                    endcase
-                    if(count == clk4*4 - 1) begin
-                        if(temp_addr[0] == 1'b1) begin
-                            state <= WRITE;
-                            read_mem <= 1'b1;
-                            wr_en <= 1'b1;
-                        end
-                        else begin
-                            state <= READ;
-                            wr_en <= 1'b0;
-                        end
-                    end
-                    else begin
-                        state <= ADDR_ACK;
-                    end
-                end
-
-                WRITE: begin
-                    read_mem <= 1'b0;
-                    if(data_count <= 7) begin
-                        case(pulse)
-
-                            0: begin
-                            end
-                            1: begin
-                                sda_temp <= (count == 100)? dout[7-data_count]:sda_temp;
-                            end
-                            2: begin
-                            end
-                            3: begin
-                            end
-
-                        endcase
-                        if(count == clk4*4 - 1) begin
-                            state <= WRITE;
-                            data_count <= data_count + 1;
-                        end
-                        else begin
-                            state <= WRITE;
-                        end
-                    end
-                    else begin
-                        state <= MASTER_ACK;
-                        data_count <= 0;
-                        wr_en <= 1'b0;
-                    end
-                end
-
-                MASTER_ACK: begin
-                    case(pulse)
-                        0: begin
-                        end
-                        1: begin
-                        end
-                        2: begin
-                            recv_ack <= (count == 200) ? sda:recv_ack;
-                        end
-                        3: begin
-                        end
-                    endcase
-
-                    if(count == clk4*4 - 1) begin
-                        if(recv_ack) begin
-                            ack_err <= 1'b0;
-                            state <= STOP;
-                            wr_en <= 1'b0;
-                        end
-                        else begin
-                            ack_err <= 1'b1;
-                            state <= STOP;
-                            wr_en <= 1'b0;
-                        end
-                    end
-                    else begin
-                        state <= MASTER_ACK;
-                    end
-                end
-
-                READ: begin
-                    if(data_count <= 7) begin
-                        case(pulse)
-                            0: begin
-                            end
-                            1: begin
-                            end
-                            2: begin
-                                din <= (count == 200) ? {din[6:0], sda}: din;
-                            end
-                            3: begin
-                            end
-                        endcase
-                        if(count == clk4*4 - 1) begin
-                            state <= READ;
-                            data_count <= data_count + 1;
-                        end
-                        else begin
-                            state <= READ;
-                        end
-                    end
-                    else begin
-                        state <= SLAVE_ACK;
-                        data_count <= 0;
-                        wr_en <= 1'b1;
-                        write_mem <= 1'b1;
-                    end
-                end
-
-                SLAVE_ACK: begin
-                    case(pulse)
-                        0: begin
-                            sda_temp <= 1'b0;
-                        end
-                        1: begin
-                            write_mem <= 1'b0;
-                        end
-                        2: begin
-                        end
-                        3: begin
-                        end
-                    endcase
-                    if(count == clk4*4 - 1) begin
-                        state <= STOP;
-                        wr_en <= 1'b0;
-                    end
-                    else begin
-                        state <= SLAVE_ACK;
-                    end
-                end
-
-                STOP: begin
-                    if(pulse == 3 && count == 399) begin
-                        state <= IDLE;
-                        busy <= 1'b0;
-                        done <= 1'b1;
-                    end
-                    else begin
-                        state <= STOP;
-                    end
-                end
-
-                default: state <= IDLE;
-
-            endcase
-
-        end
-    end
-
-    assign sda = (wr_en == 1'b1)? sda_temp:1'bz;
-
-endmodule
+`ifndef DATA_WIDTH 
+	`define DATA_WIDTH 8
+`endif
+
+`ifndef ADDR_WIDTH
+	`define ADDR_WIDTH 7
+`endif
+
+`ifndef CLK_FREQUENCY
+	`define CLK_FREQUENCY 40000000 // 40MHz
+`endif
+
+`ifndef I2C_FREQUENCY
+	`define I2C_FREQUENCY 100000 // 100KHz
+`endif
+
+`ifndef CLK_COUNT
+	`define CLK_COUNT (`CLK_FREQUENCY/`I2C_FREQUENCY) // 400
+`endif
+
+`ifndef CLK_4
+	`define CLK_4 (`CLK_COUNT/4) // 100
+`endif
+
+interface i2c_intf;
+  logic clk, rst;
+  logic [`ADDR_WIDTH-1:0] addr;
+  logic [`DATA_WIDTH-1:0] din;
+  logic start, oper, ack_err, busy, done; 
+endinterface
 
 module top(
-    input clk, rst, start_bit, op,
-    input [6:0] addr,
-    input [7:0] din,
-    output [7:0] dout,
-    output busy, ack_err,
-    output done
+  input clk, rst,
+  input [`ADDR_WIDTH-1:0] addr,
+  input [`DATA_WIDTH-1:0] din,
+  input start,
+  input oper,
+  output ack_err, busy, done
 );
-
-    wire sda, scl;
-    wire ack_errm, ack_errs;
-
-    I2C_master DUT0(.clk(clk), .rst(rst), .sda(sda), .scl(scl), .addr(addr), .din(din), .dout(dout), .busy(busy), .ack_err(ack_errm), .done(done), .start_bit(start_bit), .op(op));
-    I2C_slave DUT1(.clk(clk), .rst(rst), .sda(sda), .scl(scl), .done(done), .ack_err(ack_errs));
-
-    assign ack_err = ack_errm|ack_errs;
-
+  
+  wire sda, scl;
+  wire ack_errm, ack_errs, donem, dones, busym, busys;
+  wire [`DATA_WIDTH-1:0] data_outm, data_outs;
+  
+  i2c_master m0(clk, rst, start, addr, din, oper, sda, scl, ack_errm, busym, donem, data_outm);
+  i2c_slave s0(clk, rst, scl, sda, dones, ack_errs, busys, data_outs);
+  
+  assign ack_err = ack_errm||ack_errs;
+  assign done = donem&&dones;
+  assign busy = busym&&busys;
+  
 endmodule
 
-interface I2C_intf;
+module i2c_master(
+  input clk, rst,
+  input start,
+  input [`ADDR_WIDTH-1:0] addr,
+  input [`DATA_WIDTH-1:0] data_in,
+  input oper,
+  inout sda,
+  output scl,
+  output reg ack_err, busy, done,
+  output [`DATA_WIDTH-1:0] data_out
+);
+  
+  // Generation of Pulse
+  
+  reg [1:0] pulse;
+  integer count;
+  
+  always@(posedge clk) begin
+    if(rst) begin
+      pulse <= 0;
+      count <= 0;
+    end
+    else if(!busy) begin
+      pulse <= 0;
+      count <= 0;
+    end
+    else if(count == `CLK_4 - 1) begin // 0-99
+      pulse <= 2'b01;
+      count <= count + 1;
+    end
+    else if(count == `CLK_4*2 - 1) begin // 100-199
+      pulse <= 2'b10;
+      count <= count + 1;
+    end
+    else if(count == `CLK_4*3 - 1) begin // 200-299
+      pulse <= 2'b11;
+      count <= count + 1;
+    end
+    else if(count == `CLK_4*4 - 1) begin // 300-399
+      pulse <= 0;
+      count <= 0;
+    end
+    else begin
+      count <= count + 1;
+    end
+  end
+  
+  // FSM FOR I2C MASTER
+  
+  reg [`DATA_WIDTH-1:0] temp_din, temp_addr, temp_dout;
+  reg sda_temp, scl_temp;
+  reg recv_ack;
+  reg wr_en;
+  integer data_count;
+  
+  typedef enum bit [3:0] {IDLE, START, ADDR, ADDR_ACK, WRITE, WRITE_ACK, READ, READ_NACK, STOP} states;
+  states state;
+  
+  always@(posedge clk) begin
+    if(rst) begin
+      state <= IDLE;
+      temp_din <= 0;
+      temp_dout <= 0;
+      temp_addr <= 0;
+      sda_temp <= 1'b1;
+      scl_temp <= 1'b1;
+      recv_ack <= 1'b0; 
+      wr_en <= 1'b0;
+      data_count <= 0;
+      ack_err <= 1'b0;
+      done <= 1'b0;
+      busy <= 1'b0;
+    end
+    else begin
+      case(state) 
+        
+        IDLE: begin
+          temp_dout <= 0;
+          recv_ack <= 1'b0;
+          data_count <= 0;
+          ack_err <= 1'b0;
+          done <= 1'b0;
+          if(start) begin
+            state <= START;
+            temp_din <= data_in;
+            temp_addr <= {addr, oper};
+            wr_en <= 1'b1;
+            busy <= 1'b1;
+          end
+          else begin
+            state <= IDLE;
+            temp_din <= 0;
+            temp_addr <= 0;
+            wr_en <= 1'b0;
+            busy <= 1'b0;
+          end
+        end
+        
+        START: begin
+          case(pulse)
+            0: begin
+              scl_temp <= 1'b1;
+              sda_temp <= 1'b1;
+            end
+            1: begin
+              scl_temp <= 1'b1;
+              sda_temp <= 1'b1;
+            end
+            2: begin
+              scl_temp <= 1'b1;
+              sda_temp <= 1'b0;
+            end
+            3: begin
+              scl_temp <= 1'b1;
+              sda_temp <= 1'b0;
+            end
+          endcase
+          if(count == `CLK_4*4-1) begin
+            state <= ADDR;
+            wr_en <= 1'b1;
+            scl_temp <= 1'b0;
+          end
+          else begin
+            state <= START;
+          end
+        end
+        
+        ADDR: begin
+          if(data_count<=7) begin
+            case(pulse)
+              0: begin
+                scl_temp <= 1'b0;
+                sda_temp <= 1'b0;
+              end
+              1: begin
+                scl_temp <= 1'b0;
+                sda_temp <= temp_addr[7-data_count]; // data can be sent through pulse 0 or 1
+              end
+              2: begin
+                scl_temp <= 1'b1;
+                if(sda !== temp_addr[7-data_count]) begin
+                  ack_err <= 1'b1;
+                end
+              end
+              3: begin
+                scl_temp <= 1'b1;
+              end
+            endcase
+            if(count == `CLK_4*4 - 1) begin
+              if(ack_err) begin
+                wr_en <= 1'b1;
+                state <= STOP;
+                scl_temp <= 1'b0;
+              end
+              else begin
+              	data_count <= data_count + 1;
+              	state <= ADDR;
+              	scl_temp <= 1'b0;
+              end
+            end
+            else begin
+              state <= ADDR;
+            end
+          end
+          else begin
+            state <= ADDR_ACK;
+            data_count <= 0;
+            wr_en <= 1'b0;
+          end
+        end
+        
+        ADDR_ACK: begin
+          case(pulse)
+            0: begin
+              scl_temp <= 1'b0;
+            end
+            1: begin
+              scl_temp <= 1'b0;
+            end
+            2: begin
+              scl_temp <= 1'b1;
+              recv_ack <= sda; // we can receive at 2 or 3 
+            end
+            3: begin
+              scl_temp <= 1'b1;
+            end
+          endcase
+          if(count == `CLK_4*4 - 1) begin
+            if(!recv_ack) begin
+              if(temp_addr[0] == 1'b0) begin // WRITE
+                state <= WRITE;
+                wr_en <= 1'b1;
+                scl_temp <= 1'b0; // SCL is low after every state change because data change happens only on low scl
+              end
+              else begin // READ
+                state <= READ;
+                wr_en <= 1'b0;
+                scl_temp <= 1'b0;
+              end
+            end
+            else begin
+              ack_err <= 1'b1; 
+              state <= STOP;
+              wr_en <= 1'b1;
+              scl_temp <= 1'b0;
+            end
+          end
+          else begin
+            state <= ADDR_ACK;
+          end
+        end
+        
+        WRITE: begin
+          if(data_count<=7) begin
+            case(pulse)
+              0: begin
+                scl_temp <= 1'b0;
+                sda_temp <= 1'b0;
+              end
+              1: begin
+                scl_temp <= 1'b0;
+                sda_temp <= temp_din[7-data_count];
+              end
+              2: begin
+                scl_temp <= 1'b1;
+                if(sda != temp_din[7-data_count]) begin
+                  ack_err <= 1'b1;
+                end
+              end
+              3: begin
+                scl_temp <= 1'b1;
+              end
+            endcase
+            if(count == `CLK_4*4 - 1) begin
+              if(ack_err) begin
+                scl_temp <= 1'b0;
+                wr_en <= 1'b1;
+                state <= STOP;
+              end
+              else begin
+                state <= WRITE;
+              	scl_temp <= 1'b0;
+              	data_count <= data_count + 1;
+              end
+            end
+            else begin
+              state <= WRITE;
+            end
+          end
+          else begin
+            wr_en <= 1'b0;
+            state <= WRITE_ACK;
+            scl_temp <= 1'b0;
+            data_count <= 0;
+          end
+        end
+        
+        WRITE_ACK: begin
+          case(pulse)
+            0: begin
+              scl_temp <= 1'b0;
+            end
+            1: begin
+              scl_temp <= 1'b0;
+            end
+            2: begin
+              scl_temp <= 1'b1;
+              recv_ack <= sda;
+            end
+            3: begin
+              scl_temp <= 1'b1;
+            end
+          endcase
+          if(count == `CLK_4*4 - 1) begin
+            if(!recv_ack) begin
+              state <= STOP;
+              scl_temp <= 1'b0;
+              wr_en <= 1'b1; 
+            end
+            else begin
+              ack_err <= 1'b1;
+              state <= STOP;
+              scl_temp <= 1'b0;
+              wr_en <= 1'b1;
+            end
+          end
+          else begin
+            state <= WRITE_ACK;
+          end
+        end
+        
+        READ: begin
+          if(data_count<=7) begin
+            case(pulse)
+              0: begin
+                scl_temp <= 1'b0;
+              end
+              1: begin
+                scl_temp <= 1'b0;
+              end
+              2: begin
+                scl_temp <= 1'b1;
+                temp_dout[7:0] <= (count == `CLK_4*2)? {temp_dout[6:0], sda}:temp_dout[7:0];
+              end
+              3: begin
+                scl_temp <= 1'b1;
+              end
+            endcase
+            if(count == `CLK_4*4 - 1) begin
+              data_count <= data_count + 1;
+              state <= READ;
+              scl_temp <= 1'b0;
+            end
+            else begin
+              state <= READ;
+            end
+          end
+          else begin
+            state <= READ_NACK;
+            wr_en <= 1'b1;
+            scl_temp <= 1'b0;
+            data_count <= 0;
+          end
+        end
+        
+        READ_NACK: begin
+          case(pulse) 
+            0: begin
+              scl_temp <= 1'b0;
+            end
+            1: begin
+              scl_temp <= 1'b0;
+              sda_temp <= 1'b1; // negative acknowledgment
+            end
+            2: begin
+              scl_temp <= 1'b1;
+            end
+            3: begin
+              scl_temp <= 1'b1;
+            end
+          endcase
+          if(count == `CLK_4*4 - 1) begin
+            state <= STOP;
+            wr_en <= 1'b1;
+            scl_temp <= 1'b0;
+          end
+          else begin
+            state <= READ_NACK;
+          end
+        end
+        
+        STOP: begin
+          case(pulse) 
+            0: begin
+              scl_temp <= 1'b1;
+              sda_temp <= 1'b0;
+            end
+            1: begin
+              scl_temp <= 1'b1;
+              sda_temp <= 1'b0;
+            end
+            2: begin
+              scl_temp <= 1'b1;
+              sda_temp <= 1'b1;
+            end
+            3: begin
+              scl_temp <= 1'b1;
+              sda_temp <= 1'b1;
+            end
+          endcase
+          if(count == `CLK_4*4 - 1) begin
+            done <= 1'b1;
+            wr_en <= 1'b0;
+            state <= IDLE;
+          end
+          else begin
+            state <= STOP;
+          end
+        end
+        
+        default: state <= IDLE;
+        
+      endcase
+    end
+  end
+  
+  assign scl = scl_temp;
+  assign sda = (wr_en) ? sda_temp:1'bz;
+  assign data_out = temp_dout;
+  
+endmodule
 
-    logic clk, rst;
-    logic sda, scl;
-    logic [7:0] din, dout;
-    logic [6:0] addr;
-    logic busy, done, ack_err;
-    logic start_bit, op;
-
-endinterface
+module i2c_slave( // can add a address comparing logic
+  input clk, rst,
+  input scl,
+  inout sda,
+  output reg done, ack_err, busy,
+  output [`DATA_WIDTH-1:0] data_recv
+);
+  
+  // Generation of Pulse
+  
+  reg [1:0] pulse;
+  integer count;
+  
+  always@(posedge clk) begin
+    if(rst) begin
+      pulse <= 0;
+      count <= 0;
+    end
+    else if(!busy) begin
+      pulse <= 2;
+      count <= 200;
+    end
+    else if(count == `CLK_4 - 1) begin // 0-99
+      pulse <= 2'b01;
+      count <= count + 1;
+    end
+    else if(count == `CLK_4*2 - 1) begin // 100-199
+      pulse <= 2'b10;
+      count <= count + 1;
+    end
+    else if(count == `CLK_4*3 - 1) begin // 200-299
+      pulse <= 2'b11;
+      count <= count + 1;
+    end
+    else if(count == `CLK_4*4 - 1) begin // 300-399
+      pulse <= 0;
+      count <= 0;
+    end
+    else begin
+      count <= count + 1;
+    end
+  end
+  
+  // FSM for I2C SLAVE
+  
+  typedef enum bit [3:0] {IDLE, START, ADDR, ADDR_ACK, WRITE, WRITE_ACK, READ, READ_NACK, STOP} states;
+  states state;
+  
+  reg sda_temp;
+  reg wr_en;
+  
+  integer data_count;
+  
+  localparam mem = 8'b01101101;
+  
+  reg [`DATA_WIDTH-1:0] temp_addr, temp_dout;
+  reg recv_ack;
+  
+  always@(posedge clk) begin
+    if(rst) begin
+      recv_ack <= 1'b0;
+      temp_addr <= 0;
+      temp_dout <= 0;
+      data_count <= 0;
+      wr_en <= 1'b0;
+      sda_temp <= 1'b1;
+      state <= IDLE;
+      ack_err <= 1'b0;
+      done <= 1'b0;
+      busy <= 1'b0;
+    end
+    else begin
+      case(state)
+        
+        IDLE: begin
+          recv_ack <= 1'b0;
+          temp_addr <= 0;
+          temp_dout <= 0;
+          data_count <= 0;
+          wr_en <= 1'b0;
+          sda_temp <= 1'b1;
+          ack_err <= 1'b0;
+          done <= 1'b0;
+          if(scl == 1'b1 && sda == 1'b0) begin
+            state <= START;
+            busy <= 1'b1;
+          end
+          else begin
+            state <= IDLE;
+            busy <= 1'b0;
+          end
+        end
+        
+        START: begin
+          if(count == `CLK_4*4 - 1) begin
+            state <= ADDR;
+          end
+          else begin
+            state <= START;
+          end
+        end
+        
+        ADDR: begin
+          if(data_count <= 7) begin
+          	case(pulse)
+            	2: begin
+                  temp_addr[7:0] <= (count == `CLK_4*2) ? {temp_addr[6:0], sda}:temp_addr[7:0];
+            	end
+          	endcase
+            if(count == `CLK_4*4 - 1) begin
+              data_count <= data_count + 1;
+              state <= ADDR;
+            end
+            else begin
+              state <= ADDR;
+            end
+          end
+          else begin
+            state <= ADDR_ACK;
+            wr_en <= 1'b1;
+            data_count <= 0;
+          end
+        end
+        
+        ADDR_ACK: begin
+          case(pulse)
+            1: begin
+              sda_temp <= 1'b0; // sending ACK
+            end
+          endcase
+          if(count == `CLK_4*4 - 1) begin
+            if(temp_addr[0] == 1'b0) begin // WRITE w.r.t master
+              wr_en <= 1'b0;
+              state <= WRITE;
+            end
+            else begin // READ w.r.t master
+              wr_en <= 1'b1;
+              state <= READ;
+            end
+          end
+          else begin
+            state <= ADDR_ACK;
+          end
+        end
+        
+        WRITE: begin
+          if(data_count<=7) begin
+            case(pulse)
+              2: begin
+                temp_dout[7:0] <= (count == `CLK_4*2)? {temp_dout[6:0], sda}:temp_dout[7:0];
+              end
+            endcase
+            if(count == `CLK_4*4 - 1) begin
+              data_count <= data_count + 1;
+              state <= WRITE;
+            end
+            else begin
+              state <= WRITE;
+            end
+          end
+          else begin
+            state <= WRITE_ACK;
+            wr_en <= 1'b1;
+            data_count <= 0;
+          end
+        end
+        
+        WRITE_ACK: begin
+          case(pulse) 
+            1: begin
+              sda_temp <= 1'b0; // sending ACK
+            end
+          endcase
+          if(count == `CLK_4*4 - 1) begin
+            state <= STOP;
+            wr_en <= 1'b0;
+          end
+          else begin
+            state <= WRITE_ACK;
+          end
+        end
+        
+        READ: begin
+          if(data_count<=7) begin
+            case(pulse)
+              1: begin
+                sda_temp <= mem[7-data_count];
+              end
+            endcase
+            if(count == `CLK_4*4 - 1) begin
+              data_count <= data_count + 1;
+              state <= READ;
+            end
+            else begin
+              state <= READ;
+            end
+          end
+          else begin
+            state <= READ_NACK;
+            wr_en <= 1'b0;
+            data_count <= 0;
+          end
+        end
+        
+        READ_NACK: begin
+          case(pulse) 
+            2: begin
+              recv_ack <= sda; // receiving NACK
+            end
+          endcase
+          if(count == `CLK_4*4 - 1) begin
+            if(recv_ack == 1'b1) begin
+              state <= STOP;
+            end
+            else begin
+              ack_err <= 1'b1;
+              state <= STOP;
+            end
+          end
+        end
+        
+        STOP: begin
+          if(count == `CLK_4*4 - 1) begin
+            state <= IDLE;
+            done <= 1'b1;
+          end
+          else begin
+            state <= STOP;
+          end
+        end
+        
+        default: state <= IDLE;
+        
+      endcase
+    end
+  end
+  
+  assign sda = (wr_en) ? sda_temp: 1'bz;
+  
+  assign data_recv = temp_dout;
+  
+endmodule
