@@ -52,7 +52,7 @@ module tb;
     intf.clk <= 1'b0;
   end
   
-  always #5 intf.clk <= ~intf.clk;
+  always #12.5 intf.clk <= ~intf.clk;
   
   initial begin
     $dumpfile("dump.vcd");
@@ -141,3 +141,4 @@ module tb;
   end
   
 endmodule
+
